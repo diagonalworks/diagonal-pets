@@ -1,0 +1,1 @@
+This repository will contain code related to [Diagonal's](http://diagonal.works) work as part of the [Privacy-Enhancing Technologies Prize Challenges](https://petsprizechallenges.com/). Right now, there's just our [whitepaper](whitepaper.md).
