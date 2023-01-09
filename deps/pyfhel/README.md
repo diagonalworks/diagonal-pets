@@ -1,0 +1,1 @@
+Extend the [PETS prize runtime docker image](https://github.com/drivendataorg/pets-prize-challenge-runtime) with compilation tools, and use the resulting image to build a wheel for [Pyfhel](https://pyfhel.readthedocs.io/en/latest/), leaving it in this directory on the host machine.
