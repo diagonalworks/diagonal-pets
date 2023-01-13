@@ -6,7 +6,7 @@ import struct
 GROUP_SIZE = 32
 DTYPE = np.int64
 
-def make_pyfhel(fake=False):
+def make_pyfhel(fake):
     if fake:
         return FakePyfhel(), FakePyCtxt
     else:
@@ -23,17 +23,17 @@ class GroupedCounts:
     def __init__(self, h, ctxt):
         self.h = h
         self.ctxt = ctxt
-        self.counts = None
+        self.counts = []
 
     def add(self, counts):
-        if self.counts is None:
+        if not self.counts:
             self.counts = [self.ctxt(bytestring=b) for b in counts]
         else:
             for (c1, c2) in zip(self.counts, counts):                
                 self.h.add(c1, self.ctxt(bytestring=c2))
 
     def lookup(self, indicies):
-        if len(indicies) == 0 or self.counts is None:
+        if len(indicies) == 0 or not self.counts:
             return []
         seen = [False] * (int(max(indicies) / GROUP_SIZE) + 1)
         values = []
@@ -51,9 +51,50 @@ class GroupedCounts:
             values.append(g.to_bytes())
         return values
 
+    def all(self):
+        return [c.to_bytes() for c in self.counts]
+
+    def to_file(self, f):
+        f.write(struct.pack("<l", len(self.counts)))
+        for c in self.counts:
+            b = c.to_bytes()
+            f.write(struct.pack("<l", len(b)))
+            f.write(b)
+
+    def from_file(self, f):
+        self.counts = []
+        (n,) = struct.unpack("<l", f.read(4))
+        for i in range(0, n):
+            (l,) = struct.unpack("<l", f.read(4))
+            self.counts.append(self.ctxt(bytestring=f.read(l)))
+
+def encrypted_counts_to_bytes(counts):
+    if counts is None:
+        return b""
+    b = io.BytesIO()
+    for c in counts:
+        b.write(struct.pack("<l", len(c)))
+        b.write(c)
+    return b.getvalue()
+
+def encrypted_counts_from_bytes(b):
+    if len(b) == 0:
+        return []
+    encrypted_counts = []
+    index = None
+    i = 0
+    while i < len(b):
+        (l,) = struct.unpack("<l", b[i:i+4])
+        i += 4
+        encrypted_counts.append(b[i:i+l])
+        i += l
+    else:
+        return encrypted_counts
+
 class Aggregator:
 
     DAYS = 64
+    FL_PARAMETER_TYPE = "diagonal_pets.Aggregator"
 
     def __init__(self, h, ctxt):
         self.visits = GroupedCounts(h, ctxt)
@@ -73,6 +114,51 @@ class Aggregator:
         visits = [visits[i] for i in shuffle]
         infected_visits = [[infected_visits[day][i] for i in shuffle] for day in range(0, len(days))]
         return (visits, infected_visits)
+
+    def all_visits(self):
+        return self.visits.all()
+
+    def all_infected_visits(self, day):
+        return self.infected_visits[day].all()
+
+    def write(self, directory, visits=None, day=-1):
+        if visits is None or visits:
+            with open(directory / "visits", "wb") as f:
+                self.visits.to_file(f)
+        if visits is None:
+            days = [day] if day >= 0 else range(0, self.DAYS)
+            for day in days:
+                with open(directory / ("day-%d" % day), "wb") as f:
+                    self.infected_visits[day].to_file(f)
+
+    def read(self, directory, visits=None, day=-1):
+        if visits is None or visits:
+            with open(directory / "visits", "rb") as f:
+                self.visits.from_file(f)
+        if visits is None:
+            days = [day] if day >= 0 else range(0, self.DAYS)
+            for day in days:
+                with open(directory / ("day-%d" % day), "rb") as f:
+                    self.infected_visits[day].from_file(f)
+
+    def fill_fl_parameters(self, p, visits=False, day=-1):
+        if (not visits and day < 0) or (visits and day >=0):
+            raise ValueError("Must specify exactly one of visits or day")
+        p.tensor_type = self.FL_PARAMETER_TYPE
+        if visits:
+            p.tensors = [encrypted_counts_to_bytes(self.all_visits())]
+        else:
+            p.tensors = [encrypted_counts_to_bytes(self.all_infected_visits(day))]
+
+    def apply_fl_parameters(self, p, visits=False, day=-1):
+        if (not visits and day < 0) or (visits and day >=0):
+            raise ValueError("Must specify exactly one of visits or day")
+        if p.tensor_type != self.FL_PARAMETER_TYPE:
+            raise ValueError("Expected tensor_type %s, found %s" % (self.FL_PARAMETER_TYPE, p.tensor_type))
+        if visits:
+            self.add_visits(encrypted_counts_from_bytes(p.tensors[0]))
+        else:
+            self.add_infected_visits(day, encrypted_counts_from_bytes(p.tensors[0]))
 
 def make_aggregator(h, ctxt):
     return Aggregator(h, ctxt)

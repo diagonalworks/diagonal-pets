@@ -4,8 +4,10 @@ from diagonal_pets.crypto import init_pyfhel
 
 from diagonal_pets.data import make_file_data
 
+from diagonal_pets.federated import FitStrategy, FitClient, FIT_ROUNDS
+
 from diagonal_pets.model import read
-from diagonal_pets.model import aggregate
+from diagonal_pets.model import aggregate, aggregate_single_day
 from diagonal_pets.model import count_visits
 from diagonal_pets.model import make_model
 from diagonal_pets.model import make_batch

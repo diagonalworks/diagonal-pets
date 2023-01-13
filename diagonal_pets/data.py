@@ -8,7 +8,7 @@ def make_file_data(**args):
 
 class FileData:
 
-    def __init__(self, person_data_path, activity_location_data_path, activity_location_assignment_data_path, disease_outcome_data_path, model_dir, preds_format_path, preds_dest_path):
+    def __init__(self, person_data_path, activity_location_data_path, activity_location_assignment_data_path, disease_outcome_data_path, model_dir, preds_format_path=None, preds_dest_path=None, household_data_path=None, residence_location_data_path=None, population_network_data_path=None):
         self.person_data_path = person_data_path
         self.activity_location_data_path = activity_location_data_path
         self.activity_location_assignment_data_path = activity_location_assignment_data_path
@@ -32,9 +32,22 @@ class FileData:
     def preds_format(self):
         return CSV(self.preds_format_path, (("pid", int),))
 
-    def model_filename(self):
+    def targets(self):
+        return CSV(self.preds_format_path, (("pid", int), ("infected", lambda x: int(x) != 0)))
+
+    def preds(self, prefix=None):
+        if prefix is not None:
+            i = str(self.preds_dest_path).index("_")
+            path = Path(prefix + str(self.preds_dest_path)[i:])
+        else:
+            path = self.preds_dest_path
+        return CSV(path, (("pid", int), ("score", float)))
+
+    def model_filename(self,note=""):
+        if note:
+            note = "." + note
         n = self.person_data_path.name
-        return self.model_dir.joinpath(Path(n[0:n.index("_")] + "_model.ckpt"))
+        return self.model_dir.joinpath(Path(n[0:n.index("_")] +  "_model" + note + ".ckpt"))
     
     def preds_dest_filename(self):
         return self.preds_dest_path

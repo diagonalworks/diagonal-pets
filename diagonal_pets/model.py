@@ -50,7 +50,7 @@ def count_until_zero(xs):
 
 def count_visits(infected, person_activities, start_day, stop_day, track=progress.dont_track):
     visits = np.zeros(len(person_activities), dtype=np.uint32)
-    infected_visits = np.zeros((stop_day - start_day, len(person_activities)), np.uint16)
+    infected_visits = np.zeros((DAYS, len(person_activities)), np.uint16)
     tracker = track("count_visits", len(person_activities))
     for (pid, places) in enumerate(person_activities):
         tracker.next()
@@ -66,27 +66,29 @@ def count_visits(infected, person_activities, start_day, stop_day, track=progres
 
 STATE_INFECTED = "I"
 
-def read(data):
+def read(data, prefix=""):
+    if prefix != "":
+        prefix += " "
     max_alid = 0
     with data.activity_locations() as rows:
         for (alid,) in rows:
             if alid > max_alid:
                 max_alid = alid
-    print("alid:", alid)
+    print(prefix+"alid:", max_alid)
 
     max_pid = 0
     with data.person() as rows:
         for (pid,) in rows:
             if pid > max_pid:
                 max_pid = pid
-    print("pid:", pid)
+    print(prefix+"pid:", max_pid)
 
     activities = np.zeros(max_pid + 1, np.uint8)
     with data.activity_location_assignment() as rows:
         for (pid, alid) in rows:
             activities[pid] += 1
     max_activities = activities.max()
-    print("activities:", max_activities)
+    print(prefix+"activities:", max_activities)
 
     infected = np.zeros(max_pid + 1, np.uint64)
     infections = 0
@@ -95,7 +97,7 @@ def read(data):
             if state == STATE_INFECTED:
                 infected[pid] |= np.uint64(1 << day)
                 infections += 1
-    print("infections:", infections)
+    print(prefix+"infections:", infections)
 
     activities.fill(0)
     person_activities = np.zeros((max_pid + 1, max_activities), np.uint32)
@@ -112,7 +114,7 @@ def read(data):
                     if infected[pid] & np.uint64(1 << day):
                         infected_visits[day][lid] += 1
                 assigned_activities += 1
-    print("assigned_activities:", assigned_activities)
+    print(prefix+"assigned_activities:", assigned_activities)
     return (infected, person_activities)
 
 def aggregate(visits, infected_visits, aggregator, h, track=progress.dont_track):
@@ -122,6 +124,9 @@ def aggregate(visits, infected_visits, aggregator, h, track=progress.dont_track)
         tracker.next()
         aggregator.add_infected_visits(day, crypto.encrypt_counts(infected_visits[day], h))
     tracker.finish()
+
+def aggregate_single_day(day, infected_visits, aggregator, h, track=progress.dont_track):
+    aggregator.add_infected_visits(day, crypto.encrypt_counts(infected_visits[day], h))
 
 def sample_events(infected, selected_people, start_day, end_day, track=progress.dont_track):
     if start_day < WINDOW:
@@ -188,10 +193,14 @@ def prepare(visits, infected_visits, tensor):
 def prepare_all(examples):
     batch = make_batch()
     target = np.zeros(1, dtype=np.bool_)
+    empty = True
     for (infected_today, visits, infected_visits) in examples:
+        empty = False
         target[0] = infected_today
         prepare(visits, infected_visits, batch[0])
         yield (batch, target)
+    if empty:
+        print("prepare_all: empty")
 
 prepared_signature = (tf.TensorSpec(shape=(1, WINDOW * BUCKETS * SAMPLES, 1), dtype=tf.uint16), tf.TensorSpec(shape=(1,), dtype=tf.bool))
 
