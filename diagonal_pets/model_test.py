@@ -20,6 +20,8 @@ class ModelTest(unittest.TestCase):
 
     def setUp(self):
         crypto.init_pyfhel(self.h)
+        self.h.keyGen()
+        self.h.rotateKeyGen()
 
     def test_sample_events(self):
         start_day, stop_day = 10, 56

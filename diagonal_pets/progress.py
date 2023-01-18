@@ -49,7 +49,7 @@ class NullProgress:
 
     def next(self):
         pass
-    
+
     def finish(self):
         pass
 

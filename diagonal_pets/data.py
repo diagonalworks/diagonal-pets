@@ -8,14 +8,17 @@ def make_file_data(**args):
 
 class FileData:
 
-    def __init__(self, person_data_path, activity_location_data_path, activity_location_assignment_data_path, disease_outcome_data_path, model_dir, preds_format_path=None, preds_dest_path=None, household_data_path=None, residence_location_data_path=None, population_network_data_path=None):
+    def __init__(self, person_data_path=None, activity_location_data_path=None, activity_location_assignment_data_path=None, disease_outcome_data_path=None, model_dir=None, client_dir=None, server_dir=None, preds_format_path=None, preds_dest_path=None, household_data_path=None, residence_location_data_path=None, population_network_data_path=None, prefix=None):
         self.person_data_path = person_data_path
         self.activity_location_data_path = activity_location_data_path
         self.activity_location_assignment_data_path = activity_location_assignment_data_path
         self.disease_outcome_data_path = disease_outcome_data_path
+        self.client_dir = client_dir
         self.model_dir = model_dir
+        self.server_dir = server_dir
         self.preds_format_path = preds_format_path
         self.preds_dest_path = preds_dest_path
+        self.prefix = prefix
 
     def person(self):
         return CSV(self.person_data_path, (("pid", int),))
@@ -43,21 +46,36 @@ class FileData:
             path = self.preds_dest_path
         return CSV(path, (("pid", int), ("score", float)))
 
-    def model_filename(self,note=""):
-        if note:
-            note = "." + note
-        n = self.person_data_path.name
-        return self.model_dir.joinpath(Path(n[0:n.index("_")] +  "_model" + note + ".ckpt"))
-    
+    def model_filename(self):
+        return self._local_filename("model.ckpt")
+
+    def aggregator_directory(self):
+        return self._local_filename("aggregator")
+
+    def public_key_filename(self):
+        return self._local_filename("public.key", prefixed=False)
+
+    def secret_key_filename(self):
+        return self._local_filename("secret.key", prefixed=False)
+
+    def rotate_key_filename(self):
+        return self._local_filename("rotate.key", prefixed=False)
+
     def preds_dest_filename(self):
         return self.preds_dest_path
+
+    def _local_filename(self, name, prefixed=True):
+        path = self.client_dir or self.server_dir or self.model_dir
+        if prefixed and self.prefix:
+            name = self.prefix + "_" + name
+        return path / name
 
 class CSV:
 
     def __init__(self, filename, columns):
         self.filename = filename
         self.columns = columns
-        self.f = None       
+        self.f = None
 
     def __iter__(self):
         i = CSV(self.filename, self.columns)

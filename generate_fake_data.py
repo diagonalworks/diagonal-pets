@@ -7,7 +7,7 @@ import gzip
 import random
 import numpy as np
 
-import diagonal_pets.features
+import diagonal_pets
 
 def main():
     parser = argparse.ArgumentParser()
@@ -18,7 +18,7 @@ def main():
     args = parser.parse_args()
 
     start_day, stop_day = 0, args.days
-    infected, person_activities = diagonal_pets.features.generate_fake_data(args.people, args.places, start_day, stop_day)
+    infected, person_activities = diagonal_pets.generate_fake_data(args.people, args.places, start_day, stop_day+1)
 
     with gzip.open("%s_person.csv.gz" % args.prefix, "wt", encoding="utf8") as f:
         w = csv.writer(f)
@@ -52,9 +52,10 @@ def main():
 
     with gzip.open("%s_disease_outcome_target.csv.gz" % args.prefix, "wt", encoding="utf8") as f:
         w = csv.writer(f)
-        w.writerow(("pid",))
+        w.writerow(("pid","infected"))
+        last_day = np.uint64(1 << stop_day)
         for pid in range(0, args.people):
-            w.writerow((str(pid),))
+            w.writerow((str(pid), str(int((infected[pid] & last_day) != 0))))
 
 if __name__ == "__main__":
     main()

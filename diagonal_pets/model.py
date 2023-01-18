@@ -1,3 +1,4 @@
+import csv
 import math
 import numpy as np
 import tensorflow as tf
@@ -5,6 +6,8 @@ import tensorflow as tf
 from diagonal_pets import crypto
 from diagonal_pets import progress
 
+FIT_START_DAY = 0
+FIT_STOP_DAY = 56
 DAYS = 64
 WINDOW = 7
 
@@ -50,7 +53,7 @@ def count_until_zero(xs):
 
 def count_visits(infected, person_activities, start_day, stop_day, track=progress.dont_track):
     visits = np.zeros(len(person_activities), dtype=np.uint32)
-    infected_visits = np.zeros((DAYS, len(person_activities)), np.uint16)
+    infected_visits = np.zeros((stop_day - start_day, len(person_activities)), np.uint16)
     tracker = track("count_visits", len(person_activities))
     for (pid, places) in enumerate(person_activities):
         tracker.next()
@@ -118,15 +121,15 @@ def read(data, prefix=""):
     return (infected, person_activities)
 
 def aggregate(visits, infected_visits, aggregator, h, track=progress.dont_track):
-    aggregator.add_visits(crypto.encrypt_counts(visits, h))
+    aggregator.add_visits(aggregator.encrypt_counts(visits))
     tracker = track("aggregate", len(infected_visits))
     for day in range(0, len(infected_visits)):
         tracker.next()
-        aggregator.add_infected_visits(day, crypto.encrypt_counts(infected_visits[day], h))
+        aggregator.add_infected_visits(day, aggregator.encrypt_counts(infected_visits[day]))
     tracker.finish()
 
 def aggregate_single_day(day, infected_visits, aggregator, h, track=progress.dont_track):
-    aggregator.add_infected_visits(day, crypto.encrypt_counts(infected_visits[day], h))
+    aggregator.add_infected_visits(day, aggregator.encrypt_counts(infected_visits[day]))
 
 def sample_events(infected, selected_people, start_day, end_day, track=progress.dont_track):
     if start_day < WINDOW:
@@ -148,7 +151,7 @@ def sample_events(infected, selected_people, start_day, end_day, track=progress.
 # TODO: rename to lookup visits?
 def example(pid, day, person_activies, aggregator, h, ctxt):
     places = [lid - 1 for lid in person_activies[pid] if lid != 0]
-    visits, infected_visits = crypto.decrypt_lookup(aggregator.lookup(places, range(day - WINDOW + 1, day + 1)), h, ctxt)
+    visits, infected_visits = aggregator.lookup(places, range(day - WINDOW + 1, day + 1)).decrypt()
     return visits, infected_visits
 
 def examples(events, person_activies, aggregator, h, ctxt, track):
@@ -181,13 +184,13 @@ def prepare(visits, infected_visits, tensor):
             b.append(-1)
         buckets[i] = b[0:SAMPLES]
     i = 0
-    for b in buckets:            
+    for b in buckets:
         for w in range(0, WINDOW):
             for j in b:
                 if j >= 0:
                     tensor[i][0] = infected_visits[w][j]
                 else:
-                    tensor[i][0] = 0.0                 
+                    tensor[i][0] = 0.0
                 i += 1
 
 def prepare_all(examples):
@@ -210,11 +213,35 @@ def make_model():
     for i in range(0, BUCKETS):
         n = WINDOW * SAMPLES
         infections = tf.keras.layers.Cropping1D(cropping=(i * n, (BUCKETS - i - 1) * n))(inputs)
-        conved = tf.keras.layers.Conv1D(SAMPLES, input_shape=(WINDOW * SAMPLES, 1), kernel_size=WINDOW, strides=(SAMPLES,), activation="relu")(infections)        
+        conved = tf.keras.layers.Conv1D(SAMPLES, input_shape=(WINDOW * SAMPLES, 1), kernel_size=WINDOW, strides=(SAMPLES,), activation="relu")(infections)
         reshaped = tf.keras.layers.Reshape((WINDOW * SAMPLES,))(conved)
         buckets.append(reshaped)
     merged = tf.keras.layers.Concatenate(axis=1)(buckets)
     dense1 = tf.keras.layers.Dense(BUCKETS * SAMPLES, activation="relu")(merged)
     dense2 = tf.keras.layers.Dense(BUCKETS * SAMPLES, activation="relu")(dense1)
     outputs = tf.keras.layers.Dense(1, activation="sigmoid")(dense2)
-    return tf.keras.Model(inputs=inputs, outputs=outputs, name="model")    
+    model = tf.keras.Model(inputs=inputs, outputs=outputs, name="model")
+    model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+    return model
+
+def predict(h, ctxt, data, track=progress.dont_track):
+    infected, person_activities = read(data)
+    visits, infected_visits = count_visits(infected, person_activities, FIT_START_DAY, FIT_STOP_DAY, track)
+    aggregator = crypto.make_aggregator(h, ctxt)
+    aggregator.read(data.aggregator_directory())
+    model = tf.keras.models.load_model(data.model_filename())
+    pids = [pid for (pid,) in data.preds_format()]
+    print("pids:", len(pids))
+    batch = make_batch(len(pids))
+    t = track("prepare", len(pids))
+    for (i, pid) in enumerate(pids):
+        visits, infected_visits = example(pid, FIT_STOP_DAY - 1, person_activities, aggregator, h, ctxt)
+        prepare(visits, infected_visits, batch[i])
+        t.next()
+    t.finish()
+    predictions = model.predict(x=batch)
+    with open(data.preds_dest_filename(), "wt") as f:
+        w = csv.writer(f)
+        w.writerow(("pid", "score"))
+        for (pid, prediction) in zip(pids, predictions):
+            w.writerow((str(pid), str(prediction[0])))
