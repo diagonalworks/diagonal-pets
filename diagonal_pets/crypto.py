@@ -1,8 +1,19 @@
+# Classes that maintain encrypted counts of the total number of visits
+# made to places, and the number of visits made by people infected on
+# a given day. Counts are effectively stored in large arrays directly
+# indexed by place ID, broken up into groups of GROUP_SIZE. Groups are
+# encrypted with the homomorphic BFV scheme.
+# We expose methods to add encrypted counts, and to lookup the encrypted value
+# of counts associated with given indices.
+
+import concurrent.futures
+import gzip
 import io
-import os
 import numpy as np
+import os
 import random
 import struct
+import threading
 
 GROUP_SIZE = 2048
 DTYPE = np.int64
@@ -16,8 +27,13 @@ def make_pyfhel(fake):
         return Pyfhel.Pyfhel(), Pyfhel.PyCtxt
 
 def init_pyfhel(h):
+    # We allocate twice the number of slots as GROUP_SIZE, as we need to
+    # be able to rotate a count at index GROUP_SIZE-1 to index 0 during
+    # lookup, and rotations are only valid up to n/2.
     h.contextGen(scheme=SCHEME, n=2*GROUP_SIZE, t_bits=20, sec=128)
 
+# EncryptedLookup represents the encrypted results of looking up counts
+# by index within EncryptedCounts
 class EncryptedLookup:
 
     def __init__(self, found, h, ctxt):
@@ -25,6 +41,8 @@ class EncryptedLookup:
         self.h = h
         self.ctxt = ctxt
 
+    # Shuffle the lookup results according to the given pattern, which
+    # specifies the new index for each lookup result.
     def shuffle(self, pattern):
         self.found = [self.found[i] for i in pattern]
 
@@ -34,6 +52,7 @@ class EncryptedLookup:
     def __len__(self):
         return len(self.found)
 
+# EncryptedCounts represented a set of encrypted counts indexed by place ID
 class EncryptedCounts:
 
     def __init__(self, h, ctxt):
@@ -66,6 +85,10 @@ class EncryptedCounts:
     def clear(self):
         self.groups = []
 
+    # Return the counts associated with each index within the group, returning
+    # an encrypted result. Lookup works by finding the group containing the
+    # given index, rotating the desired value into index 0, and masking the
+    # unwanted values by multiplying all other indices by 0.
     def lookup(self, indicies):
         found = []
         if len(indicies) > 0 and self.groups:
@@ -80,18 +103,22 @@ class EncryptedCounts:
         return EncryptedLookup(found, self.h, self.ctxt)
 
     def to_file(self, f):
-        f.write(struct.pack("<l", len(self.groups)))
+        cf = gzip.open(f, "wb")
+        cf.write(struct.pack("<l", len(self.groups)))
         for c in self.groups:
             b = c.to_bytes()
-            f.write(struct.pack("<l", len(b)))
-            f.write(b)
+            cf.write(struct.pack("<l", len(b)))
+            cf.write(b)
+        cf.close()
 
     def from_file(self, f):
         self.groups = []
-        (n,) = struct.unpack("<l", f.read(4))
+        cf = gzip.open(f, "rb")
+        (n,) = struct.unpack("<l", cf.read(4))
         for i in range(0, n):
-            (l,) = struct.unpack("<l", f.read(4))
-            self.groups.append(self.ctxt(bytestring=f.read(l), pyfhel=self.h))
+            (l,) = struct.unpack("<l", cf.read(4))
+            self.groups.append(self.ctxt(bytestring=cf.read(l), pyfhel=self.h))
+        cf.close()
 
     def to_bytes(self):
         b = io.BytesIO()
@@ -100,6 +127,9 @@ class EncryptedCounts:
 
     def from_bytes(self, b):
         self.from_file(io.BytesIO(b))
+
+    def is_empty(self):
+        return len(self.groups) == 0
 
 class EncryptedAggregatorLookup:
 
@@ -110,6 +140,12 @@ class EncryptedAggregatorLookup:
     def decrypt(self):
         return (self.visits.decrypt(), [v.decrypt() for v in self.infected_visits])
 
+# Aggregator represents the total visit counts for each place, and the number
+# of visits made by people infected on a given day. Each set of counts is
+# represented by an EncryptedCounts instance. As the memory used by
+# EncryptedCounts for a large number of places can be significant, we provide
+# a functionality to move the counts of visits by people infected on given
+# days to and from disk.
 class Aggregator:
 
     DAYS = 64
@@ -120,6 +156,10 @@ class Aggregator:
         self.ctxt = ctxt
         self.visits = EncryptedCounts(h, ctxt)
         self.infected_visits = [EncryptedCounts(h, ctxt) for i in range(0, self.DAYS)]
+        self.day_reference_counts = [0] * self.DAYS
+        self.loader = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.preload = None
+        self.lock = threading.Lock()
 
     def encrypt_counts(self, counts):
         return EncryptedCounts.encrypt(counts, self.h, self.ctxt)
@@ -134,6 +174,12 @@ class Aggregator:
         for day in range(start_day, stop_day):
             self.infected_visits[day].clear()
 
+    # Lookup the encrypted visit counts (both total and infected for the given
+    # range of days) for the given set of places. The returned counts are
+    # shuffled, such that their relationship with indicies isn't obvious. While
+    # this adds minimal security (since historical visit counts provide a
+    # signature that will identify many places), it makes it clear to the
+    # caller that reversing this mapping isn't appropriate.
     def lookup(self, indicies, days):
         visits = self.visits.lookup(indicies)
         infected_visits = [self.infected_visits[day].lookup(indicies) for day in days]
@@ -168,9 +214,75 @@ class Aggregator:
         if not visits:
             days = [day] if day >= 0 else range(0, self.DAYS)
             for day in days:
-                with open(directory / ("day-%d" % day), "rb") as f:
-                    self.infected_visits[day].from_file(f)
+                self._read_day(directory, day)
 
+    # Increase the reference count for the given range of days. Days without
+    # data and a reference count larger than 0 are loaded from disk.
+    def reference_window(self, directory, start_day, stop_day):
+        self.lock.acquire()
+        for day in range(start_day, stop_day):
+            self.day_reference_counts[day] += 1
+            if self.day_reference_counts[day] > 0 and self.infected_visits[day].is_empty():
+                self._read_day(directory, day)
+        self.lock.release()
+
+    # Decrease the reference count for the given range of days. Days with
+    # data and a reference count of 0 are forgotten.
+    def unreference_window(self, start_day, stop_day):
+        self.lock.acquire()
+        for day in range(start_day, stop_day):
+            if self.day_reference_counts[day] > 0:
+                self.day_reference_counts[day] -= 1
+                if self.day_reference_counts[day] == 0:
+                    self.infected_visits[day].clear()
+        self.lock.release()
+
+    # Unreference old days, and reference new days, loading and forgetting
+    # days as appropriate. As a common case optimisation, start loading
+    # the data for 'end' with a separate thread in the background,
+    # ensuring it completes by the next call.
+    def swap_window(self, directory, old_start, old_end, start, end):
+        self.lock.acquire()
+        if self.preload is not None:
+            concurrent.futures.wait([self.preload])
+            e = self.preload.exception()
+            if e is not None:
+                raise e
+            self.preload = None
+        for day in range(old_start, old_end):
+            if self.day_reference_counts[day] > 0:
+                self.day_reference_counts[day] -= 1
+        for day in range(start, end):
+            self.day_reference_counts[day] += 1
+        for (day, count) in enumerate(self.day_reference_counts):
+            if count == 0:
+                if not self.infected_visits[day].is_empty():
+                    self.infected_visits[day].clear()
+            elif self.infected_visits[day].is_empty():
+                self._read_day(directory, day)
+        if end < self.DAYS and self.infected_visits[end].is_empty():
+            self.preload = self.loader.submit(self._read_day, directory, end)
+        self.lock.release()
+
+    def read_infected_visits_window(self, directory, start_day, stop_day):
+        self.lock.acquire()
+        for day in range(0, start_day):
+            self.infected_visits[day].clear()
+        for day in range(stop_day, len(self.infected_visits)):
+            self.infected_visits[day].clear()
+        for day in range(start_day, stop_day):
+            if self.infected_visits[day].is_empty():
+                self._read_day(directory, day)
+        self.lock.release()
+
+    def _read_day(self, directory, day):
+        filename = directory / ("day-%d" % day)
+        if os.path.exists(filename):
+            with open(filename, "rb") as f:
+                self.infected_visits[day].from_file(f)
+
+    # Fill the Flower parameters instance with a serialised version
+    # of the given visit counts.
     def fill_fl_parameters(self, p, visits=False, day=-1):
         if (not visits and day < 0) or (visits and day >=0):
             raise ValueError("Must specify exactly one of visits or day")
@@ -180,6 +292,7 @@ class Aggregator:
         else:
             p.tensors = [self.all_infected_visits(day).to_bytes()]
 
+    # Add the visit counts serialised into the given Flower parameters.
     def apply_fl_parameters(self, p, visits=False, day=-1):
         if (not visits and day < 0) or (visits and day >=0):
             raise ValueError("Must specify exactly one of visits or day")

@@ -21,11 +21,13 @@ FIT_STATE_AGGREGATE_INFECTED_VISITS = 2
 FIT_STATE_TRAIN = 3
 FIT_STATE_SAVE_MODEL = 4
 
+FIT_TRAINING_ROUNDS = 2
+
 FIT_ROUND_COUNT_VISITS = 1
 FIT_ROUND_AGGREGATE_VISITS = 2
 FIT_ROUND_AGGREGATE_ONE_DAY_INFECTED_VISITS = 3
 FIT_ROUND_TRAIN = FIT_ROUND_AGGREGATE_ONE_DAY_INFECTED_VISITS + (FIT_STOP_DAY - FIT_START_DAY) + 1
-FIT_ROUND_SAVE_MODEL = FIT_ROUND_TRAIN + 4
+FIT_ROUND_SAVE_MODEL = FIT_ROUND_TRAIN + FIT_TRAINING_ROUNDS
 
 FIT_ROUNDS = FIT_ROUND_SAVE_MODEL
 TEST_ROUNDS = 1
@@ -151,12 +153,11 @@ class FitClient(Client):
         return result
 
     def _count_visits(self):
-        aggregator = diagonal_pets.make_aggregator(self.h, self.ctxt)
         infected, person_activities = diagonal_pets.read(self.data, str(self.id))
+        aggregator = diagonal_pets.make_aggregator(self.h, self.ctxt)
         visits, infected_visits = diagonal_pets.count_visits(infected, person_activities, FIT_START_DAY, FIT_STOP_DAY, diagonal_pets.track)
-        diagonal_pets.aggregate(visits, infected_visits, aggregator, self.h, diagonal_pets.track)
+        diagonal_pets.aggregate_and_write(visits, infected_visits, aggregator, self.data.aggregator_directory(), diagonal_pets.track)
         parameters = Parameters(tensors=[], tensor_type="")
-        aggregator.write(self.data.aggregator_directory())
         return fl.common.FitRes(Status(Code.OK, "ok"), parameters, 0, {})
 
     def _aggregate_visits(self):
@@ -186,20 +187,11 @@ class FitClient(Client):
 
     def _train(self, parameters):
         aggregator = diagonal_pets.make_aggregator(self.h, self.ctxt)
-        aggregator.read(self.data.aggregator_directory())
         infected, person_activities = diagonal_pets.read(self.data, str(self.id))
-        selected_people = np.add.reduce(person_activities, axis=1) > 0
         model = diagonal_pets.make_model()
-        model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
         model.set_weights(parameters_to_ndarrays(parameters))
-        events = list(diagonal_pets.sample_events(infected, selected_people, FIT_START_DAY, FIT_STOP_DAY, diagonal_pets.track))
-        print("client", self.id, "events:", len(events))
-        def prepared():
-            examples = diagonal_pets.examples(events, person_activities, aggregator, self.h, self.ctxt, diagonal_pets.dont_track)
-            return diagonal_pets.prepare_all(examples)
-        input = tf.data.Dataset.from_generator(prepared, output_signature=diagonal_pets.prepared_signature)
-        model.fit(x=input, epochs=1)
-        return fl.common.FitRes(Status(Code.OK, "ok"), ndarrays_to_parameters(model.get_weights()), len(events), {})
+        n = diagonal_pets.fit(infected, person_activities, model, aggregator, self.data, diagonal_pets.track, epochs=1)
+        return fl.common.FitRes(Status(Code.OK, "ok"), ndarrays_to_parameters(model.get_weights()), n, {})
 
     def _save_model(self, parameters):
         model = diagonal_pets.make_model()

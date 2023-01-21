@@ -24,26 +24,24 @@ class ModelTest(unittest.TestCase):
         self.h.rotateKeyGen()
 
     def test_sample_events(self):
-        start_day, stop_day = 10, 56
+        start_day = 10
         infections = np.zeros(1000, dtype=np.uint64)
         selected_people = np.full(len(infections), True, dtype=np.bool_)
         chosen = np.random.choice(np.arange(0, len(infections)), 20, replace=False)
         expected = [pid for (i, pid) in enumerate(chosen) if i % 2 == 0]
-        days = {}
         for pid in expected:
-            days[pid] = np.random.randint(10, 56)
-            infections[pid] = 1 << days[pid]
+            day = np.random.randint(start_day, start_day + model.HORIZON)
+            infections[pid] = 1 << day
         unexpected = [pid for (i, pid) in enumerate(chosen) if i % 2 != 0]
         for pid in unexpected:
             infections[pid] = np.uint64(0xffffffffffffffff)
-        events = list(model.sample_events(infections, selected_people, start_day, stop_day))
+        events = list(model.sample_events(infections, selected_people, start_day, start_day + 1))
         self.assertEqual(len([1 for (_, _, infected) in events if infected]), len(expected))
         self.assertEqual(len([1 for (_, _, infected) in events if not infected]), len(expected))
         for pid in expected:
-            self.assertTrue((days[pid], pid, True) in events)
+            self.assertTrue((start_day, pid, True) in events)
 
     def test_sample_events_filters_people(self):
-        start_day, stop_day = 10, 56
         infections = np.zeros(1000, dtype=np.uint64)
         selected_people = np.full(len(infections), False, dtype=np.bool_)
         infection_day = 36
@@ -51,10 +49,12 @@ class ModelTest(unittest.TestCase):
             infections[pid] = np.uint64(1 << infection_day)
         for pid in (20, 30):
             selected_people[pid] = True
-        events = list(model.sample_events(infections, selected_people, start_day, stop_day))
-        self.assertEqual([(infection_day, 20, True), (infection_day, 30, False)], events)
+        start_day = infection_day - 2
+        self.assertTrue(infection_day - start_day < model.HORIZON)
+        events = list(model.sample_events(infections, selected_people, start_day, start_day+1))
+        self.assertEqual([(start_day, 20, True), (start_day, 30, False)], events)
 
-    def test_prepare(self):
+    def test_to_model_input(self):
         start_day, stop_day, example_day = 0, 56, 10
         people, places = 1000, 100
         infected, person_activities = model.generate_fake_data(people, places, start_day, stop_day)
@@ -62,9 +62,9 @@ class ModelTest(unittest.TestCase):
         visits, infected_visits = model.count_visits(infected, person_activities, start_day, stop_day)
         aggregator = crypto.Aggregator(self.h, self.ctxt)
         model.aggregate(visits, infected_visits, aggregator, self.h)
-        visits, infected_visits = model.example(pid, example_day, person_activities, aggregator, self.h, self.ctxt)
+        visits, infected_visits = model.lookup_visits(pid, example_day, person_activities, aggregator)
         batch = np.zeros((1, model.WINDOW * model.BUCKETS * model.SAMPLES, 1), dtype=np.uint16)
-        model.prepare(visits, infected_visits, batch[0])
+        model.to_model_input(visits, infected_visits, batch[0])
         # Sanity test the prepared features - they shouldn't be empty,
         # each group should be ordered by the most recent infection count,
         # and infections should increase over time, due to the distribution of
@@ -82,15 +82,15 @@ class ModelTest(unittest.TestCase):
     def test_count_infected_visits(self):
         start_day, stop_day = 0, 56
         infected, person_activities = model.generate_fake_data(1000, 100, start_day, stop_day)
-        selected_people = np.full(len(person_activities), True, dtype=np.bool_)
         _, infected_visits = model.count_visits(infected, person_activities, start_day, stop_day)
-        events = model.sample_events(infected, selected_people, start_day, stop_day)
-        for (day, pid, infected_today) in events:
-            if infected_today and day > 0:
-                for lid in person_activities[pid]:
-                    if lid == 0:
-                        break
-                    self.assertGreater(infected_visits[day-start_day][lid-1], infected_visits[day-start_day-1][lid-1])
+        for (day, pid,) in model.newly_positive_events(infected, start_day, stop_day):
+            for lid in person_activities[pid]:
+                if lid == 0:
+                    break
+                # The number of infected visits to places by a given person should
+                # increase by (at least) 1 the day they're infected - because they've
+                # visited themselves.
+                self.assertGreater(infected_visits[day-start_day][lid-1], infected_visits[day-start_day-1][lid-1])
 
 def main():
     parser = argparse.ArgumentParser()

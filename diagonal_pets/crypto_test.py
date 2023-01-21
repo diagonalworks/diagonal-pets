@@ -53,8 +53,6 @@ class AggregatorTest(unittest.TestCase):
         aggregator.add_infected_visits(36, aggregator.encrypt_counts(cleared_visits))
         aggregator.clear_infected_visits(30, 40)
         aggregator.add_infected_visits(36, aggregator.encrypt_counts(expected_visits))
-        print(expected_visits)
-        print(aggregator.all_infected_visits(36).decrypt()[0:places])
         self.assertTrue((expected_visits == aggregator.all_infected_visits(36).decrypt()[0:places]).all())
 
     def test_file_round_trip(self):

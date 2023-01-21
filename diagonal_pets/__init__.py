@@ -9,17 +9,13 @@ from diagonal_pets.federated import FitStrategy, FitClient, FIT_ROUNDS
 from diagonal_pets.federated import TestStrategy, TestClient, TEST_ROUNDS
 
 from diagonal_pets.model import read
-from diagonal_pets.model import aggregate, aggregate_single_day
+from diagonal_pets.model import aggregate, aggregate_single_day, aggregate_and_write
 from diagonal_pets.model import count_visits
 from diagonal_pets.model import make_model
 from diagonal_pets.model import make_batch
 from diagonal_pets.model import generate_fake_data
 from diagonal_pets.model import sample_events
-from diagonal_pets.model import example
-from diagonal_pets.model import examples
-from diagonal_pets.model import prepare
-from diagonal_pets.model import prepare_all
-from diagonal_pets.model import prepared_signature
+from diagonal_pets.model import fit
 from diagonal_pets.model import predict
 from diagonal_pets.model import WINDOW
 

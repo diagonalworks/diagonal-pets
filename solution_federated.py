@@ -8,13 +8,21 @@ FAKE_PYFHEL=True
 import argparse
 import flwr as fl
 import os
+import tensorflow as tf
 
 from pathlib import Path
 
 import diagonal_pets
 
+try:
+    tf.config.set_visible_devices([], "GPU")
+    print("federated: disabling GPU")
+except Exception as e:
+    print("federated: disabling GPU: %s" % e)
+
 def train_setup(server_dir, client_dirs_dict, fake_pyfhel=FAKE_PYFHEL):
     h, ctxt = diagonal_pets.make_pyfhel(fake_pyfhel)
+    diagonal_pets.init_pyfhel(h)
     h.keyGen()
     h.rotateKeyGen()
     data = diagonal_pets.make_file_data(server_dir=server_dir)
@@ -25,6 +33,7 @@ def train_setup(server_dir, client_dirs_dict, fake_pyfhel=FAKE_PYFHEL):
 
 def train_strategy_factory(server_dir, fake_pyfhel=FAKE_PYFHEL, prefix="dw"):
     h, ctxt = diagonal_pets.make_pyfhel(fake_pyfhel)
+    diagonal_pets.init_pyfhel(h)
     data = diagonal_pets.make_file_data(server_dir=server_dir)
     diagonal_pets.read_keys(data, h, secret=False, public=True, rotate=True)
     strategy = fl.server.strategy.FedAvg()
@@ -32,6 +41,7 @@ def train_strategy_factory(server_dir, fake_pyfhel=FAKE_PYFHEL, prefix="dw"):
 
 def train_client_factory(cid, fake_pyfhel=FAKE_PYFHEL, client_dir=None, **args):
     h, ctxt = diagonal_pets.make_pyfhel(fake_pyfhel)
+    diagonal_pets.init_pyfhel(h)
     data = diagonal_pets.make_file_data(client_dir=client_dir)
     diagonal_pets.read_keys(data, h, secret=True, public=True, rotate=True)
     return diagonal_pets.FitClient(cid, h, ctxt, client_dir=client_dir, **args)
@@ -41,6 +51,7 @@ def test_strategy_factory(server_dir, fake_pyfhel=FAKE_PYFHEL, prefix="dw"):
 
 def test_client_factory(cid, fake_pyfhel=FAKE_PYFHEL, client_dir=None, **args):
     h, ctxt = diagonal_pets.make_pyfhel(fake_pyfhel)
+    diagonal_pets.init_pyfhel(h)
     data = diagonal_pets.make_file_data(client_dir=client_dir)
     diagonal_pets.read_keys(data, h, secret=True, public=True, rotate=True)
     return diagonal_pets.TestClient(cid, h, ctxt, client_dir=client_dir, **args)
