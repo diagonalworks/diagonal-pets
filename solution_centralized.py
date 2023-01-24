@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+#
+# Train a model in a centralised environment.
+#
+# Example workflow:
+# ./sample_data.py --prefix=va --percentage=10
+# ./solution_centralized.py --prefix=va10 --fit --pyfhel
+# ./solution_centralized.py --prefix=va10 --predict --pyfhel
+# ./solution_centralized.py --prefix=va10 --score
 
 import sys
 sys.path.append("/code_execution/src/")
@@ -74,11 +82,11 @@ def score(score_prefix, **args):
     y_true = [int(target.get(pid, 0)) for (pid, score) in predictions]
     y_score = [score for (pid, score) in predictions]
     print("ap: ", average_precision_score(y_true, y_score))
-    RocCurveDisplay.from_predictions(y_true, y_score)
-    plt.plot([0, 1], [0, 1], "k--")
+    RocCurveDisplay.from_predictions(y_true, y_score, color="#2c339c")
+    plt.plot([0, 1], [0, 1], color="black", linestyle="dotted")
     plt.axis("square")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
+    plt.xlabel("False positives")
+    plt.ylabel("True positives")
     plt.legend()
     plt.show()
 
@@ -91,12 +99,23 @@ def main():
     parser.add_argument("--input", default=".", help="The directory containing training data")
     parser.add_argument("--output", default=".", help="The directory in which to write the model")
     parser.add_argument("--pyfhel", action="store_true", help="Use the real Pyfhel library, rather than a fake")
+    parser.add_argument("--fake-pyfhel", dest="fake_pyfhel", action="store_true", help="Use a fake Pyfhel library, rather than the real")
     parser.add_argument("--preds_prefix", default=None, help="Prefix of output to score, if not --prefix")
     flags = parser.parse_args()
+
+    fake_pyfhel = FAKE_PYFHEL
+    if flags.pyfhel and flags.fake-pyfhel:
+        print("Can only specify one of --pyfhel and --fake-pyfhel")
+        return
+    if flags.pyfhel:
+        fake_pyfhel = False
+    elif flags.fake_pyfhel:
+        fake_pyfhel = True
+
     if flags.fit:
-        fit(fake_pyfhel=not flags.pyfhel, **paths_from_flags(flags))
+        fit(fake_pyfhel=fake_pyfhel, **paths_from_flags(flags))
     if flags.predict:
-        predict(fake_pyfhel=not flags.pyfhel, **paths_from_flags(flags))
+        predict(fake_pyfhel=fake_pyfhel, **paths_from_flags(flags))
     if flags.score:
         score(score_prefix=flags.preds_prefix, **paths_from_flags(flags))
 

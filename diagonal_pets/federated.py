@@ -187,6 +187,7 @@ class FitClient(Client):
 
     def _train(self, parameters):
         aggregator = diagonal_pets.make_aggregator(self.h, self.ctxt)
+        aggregator.read(self.data.aggregator_directory(), visits=True)
         infected, person_activities = diagonal_pets.read(self.data, str(self.id))
         model = diagonal_pets.make_model()
         model.set_weights(parameters_to_ndarrays(parameters))

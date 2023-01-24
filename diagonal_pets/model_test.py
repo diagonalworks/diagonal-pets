@@ -23,7 +23,7 @@ class ModelTest(unittest.TestCase):
         self.h.keyGen()
         self.h.rotateKeyGen()
 
-    def test_sample_events(self):
+    def test_infection_events(self):
         start_day = 10
         infections = np.zeros(1000, dtype=np.uint64)
         selected_people = np.full(len(infections), True, dtype=np.bool_)
@@ -35,13 +35,13 @@ class ModelTest(unittest.TestCase):
         unexpected = [pid for (i, pid) in enumerate(chosen) if i % 2 != 0]
         for pid in unexpected:
             infections[pid] = np.uint64(0xffffffffffffffff)
-        events = list(model.sample_events(infections, selected_people, start_day, start_day + 1))
-        self.assertEqual(len([1 for (_, _, infected) in events if infected]), len(expected))
-        self.assertEqual(len([1 for (_, _, infected) in events if not infected]), len(expected))
+        events = [(pid, True) for pid in model.infected_within_horizon(infections, selected_people, start_day)]
+        events += [(pid, False) for pid in model.clear_within_horizon(infections, selected_people, start_day)]
+        self.assertEqual(len([1 for (_, infected) in events if infected]), len(expected))
         for pid in expected:
-            self.assertTrue((start_day, pid, True) in events)
+            self.assertTrue((pid, True) in events)
 
-    def test_sample_events_filters_people(self):
+    def test_infection_events_selecting_people(self):
         infections = np.zeros(1000, dtype=np.uint64)
         selected_people = np.full(len(infections), False, dtype=np.bool_)
         infection_day = 36
@@ -51,8 +51,9 @@ class ModelTest(unittest.TestCase):
             selected_people[pid] = True
         start_day = infection_day - 2
         self.assertTrue(infection_day - start_day < model.HORIZON)
-        events = list(model.sample_events(infections, selected_people, start_day, start_day+1))
-        self.assertEqual([(start_day, 20, True), (start_day, 30, False)], events)
+        events = [(pid, True) for pid in model.infected_within_horizon(infections, selected_people, start_day)]
+        events += [(pid, False) for pid in model.clear_within_horizon(infections, selected_people, start_day)]
+        self.assertEqual([(20, True), (30, False)], events)
 
     def test_to_model_input(self):
         start_day, stop_day, example_day = 0, 56, 10
@@ -91,6 +92,12 @@ class ModelTest(unittest.TestCase):
                 # increase by (at least) 1 the day they're infected - because they've
                 # visited themselves.
                 self.assertGreater(infected_visits[day-start_day][lid-1], infected_visits[day-start_day-1][lid-1])
+
+    def test_count_iterator(self):
+        l = range(10, 20)
+        c = model.Count(l)
+        self.assertEqual(list(l), list(c))
+        self.assertEqual(len(l), c.count)
 
 def main():
     parser = argparse.ArgumentParser()

@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+#
+# Train a model in a federated environment.
+#
+# Example workflow:
+# ./sample_data.py --prefix=va --percentage=10
+# ./sample_data.py --prefix=va10 --percentage=100 --shards=3
+# ./solution_federated.py --prefix=va10100 --fit --clients=3
+# ./solution_federated.py --prefix=va10100 --predict --clients=3
+# ./solution_federated.py --prefix=va10100 --score
 
 import sys
 sys.path.append("/code_execution/src/")
@@ -78,7 +87,7 @@ def main():
     parser.add_argument("--output", default=".", help="The directory in which to write the model")
     parser.add_argument("--clients", default=3, type=int, help="Number of clients to start")
     parser.add_argument("--pyfhel", action="store_true", help="Use the real Pyfhel library, rather than a fake")
-    parser.add_argument("--fake-pyfhel", dest="fake_pyfhel", action="store_true", help="Use the real Pyfhel library, rather than a fake")
+    parser.add_argument("--fake-pyfhel", dest="fake_pyfhel", action="store_true", help="Use a fake Pyfhel library, rather than the real")
     flags = parser.parse_args()
 
     fake_pyfhel = FAKE_PYFHEL

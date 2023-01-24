@@ -14,7 +14,6 @@ from diagonal_pets.model import count_visits
 from diagonal_pets.model import make_model
 from diagonal_pets.model import make_batch
 from diagonal_pets.model import generate_fake_data
-from diagonal_pets.model import sample_events
 from diagonal_pets.model import fit
 from diagonal_pets.model import predict
 from diagonal_pets.model import WINDOW

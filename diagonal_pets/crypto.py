@@ -90,6 +90,8 @@ class EncryptedCounts:
     # given index, rotating the desired value into index 0, and masking the
     # unwanted values by multiplying all other indices by 0.
     def lookup(self, indicies):
+        if self.is_empty():
+            raise KeyError("Lookup on empty EncryptedCounts")
         found = []
         if len(indicies) > 0 and self.groups:
             for i in range(0, len(indicies)):

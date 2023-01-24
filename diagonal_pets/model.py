@@ -23,6 +23,34 @@ DAYS = 64
 #  The number of days of visit count history to use as input to the model.
 WINDOW = 7
 
+# The number of days into the future to consider an infection leading to a
+# positive training example. In the ideal case, this would be 7, as we're
+# attempting to predict an infection within a week. We only use features
+# associated with places, however, so raising this value amplifies noise.
+# Empirically set based on test fit runs.
+HORIZON = 3
+
+# The number of negative training examples to places with no previous infected
+# visits to discard while attempting to find an example with infected visits.
+# See bias_infected_places. Empirically set based on test fit runs.
+INFECTED_PLACE_BIAS = 5
+
+# Count the number of items yields from an iterator
+class Count:
+
+    def __init__(self, i=None):
+        self.count = 0
+        if i:
+            self.i = iter(i)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        n = next(self.i)
+        self.count += 1
+        return n
+
 def generate_fake_data(people, places, start_day, stop_day):
     infected = np.zeros(people, dtype=np.uint64)
     # exponential growth of infections from start_day to stop_day
@@ -170,37 +198,79 @@ def newly_positive_events(infected, start_day, end_day):
         for pid in newly_positive:
             yield (day, pid)
 
-# The number of days into the future to consider an infection leading to a
-# positive training example. In the ideal case, this would be 7, as we're
-# attempting to predict an infection within a week. We only use features
-# associated with places, however, so raising this value amplifies noise.
-# We emperially set a value of 3 based on the results of test fit runs.
-HORIZON = 3
+# Return an iterator yielding individuals infected within HORIZON days
+# of the given day.
+def infected_within_horizon(infected, selected_people, day):
+    clear_yesterday = np.bitwise_and(infected,  np.uint64(1 << (day - 1))) == np.uint64(0)
+    mask = np.uint64(0)
+    for infection_day in range(day, min(day + HORIZON, DAYS)):
+        mask |= np.uint64(1 << infection_day)
+    infection = np.bitwise_and(infected, mask) != np.uint64(0)
+    for pid in np.flatnonzero(np.logical_and(np.logical_and(clear_yesterday, infection), selected_people)):
+        yield pid
 
-# Return an iterator of (day, pid, infected within horizon) to use as the basis
-# of training examples. We attempt to balance the number of positive and negative
-# events generated from each day.
-def sample_events(infected, selected_people, start_day, end_day, track=progress.dont_track):
+# Return an iterator yielding individuals reaminain uninfected within
+# HORIZON days of the given day.
+def clear_within_horizon(infected, selected_people, day):
+    mask = np.uint64(0)
+    for infection_day in range(day-1, min(day + HORIZON, DAYS)):
+        mask |= np.uint64(1 << infection_day)
+    for pid in np.flatnonzero(np.logical_and(np.bitwise_and(infected, mask) == np.uint64(0), selected_people)):
+        yield pid
+
+# Iterate across the individuals yielded by pids, returning the total
+# place visits counts for place they visit, together with the historical
+# infection counts within WINDOW.
+def make_features_all(pids, infected_today, day, person_activies, aggregator):
+    for pid in pids:
+        visits, infected_visits = lookup_visits(pid, day, person_activies, aggregator)
+        yield infected_today, visits, infected_visits
+
+# Scan forward INFECTED_PLACE_BIAS feature examples, looking for features with
+# at least one non-zero infected visit count, returning the first found,
+# otherwise, return the next feature example.
+def bias_infected_places(features):
+    try:
+        while True:
+            for i in range(0, INFECTED_PLACE_BIAS):
+                infected_today, visits, infected_visits = next(features)
+                if sum([sum(place) for place in infected_visits]) > 0:
+                    yield infected_today, visits, infected_visits
+                    break
+            else:
+                yield next(features)
+    except StopIteration:
+        pass
+
+def sample_features_on_day(infected, selected_people, person_activies, aggregator, day):
+    infected_pids = infected_within_horizon(infected, selected_people, day)
+    infected_visits = make_features_all(infected_pids, True, day, person_activies, aggregator)
+    clear_pids = clear_within_horizon(infected, selected_people, day)
+    clear_visits = bias_infected_places(make_features_all(clear_pids, False, day, person_activies, aggregator))
+    try:
+        while True:
+            yield next(infected_visits)
+            yield next(clear_visits)
+    except StopIteration:
+        pass
+
+def sample_features_all_days(start_day, end_day, infected, selected_people, person_activies, aggregator, directory, track=progress.dont_track):
     if start_day < WINDOW:
         start_day = WINDOW
     if end_day > DAYS:
         end_day = DAYS
-    tracker = track("sample_events", len(range(start_day, end_day)))
+    t = track("sample_features_all_days", end_day - start_day)
+    last_day = start_day
+    aggregator.reference_window(directory, last_day - WINDOW + 1, last_day + 1)
     for day in range(start_day, end_day):
-        clear_yesterday = np.bitwise_and(infected,  np.uint64(1 << (day - 1))) == np.uint64(0)
-        infection_mask = np.uint64(0)
-        for infection_day in range(day, min(day + HORIZON, DAYS)):
-            infection_mask |= np.uint64(1 << infection_day)
-        infected_within_horizon = np.bitwise_and(infected, infection_mask) != np.uint64(0)
-        infected_pids = np.flatnonzero(np.logical_and(np.logical_and(clear_yesterday, infected_within_horizon), selected_people))
-        for pid in infected_pids:
-            yield (day, pid, True)
-        clear_mask = infection_mask |  np.uint64(1 << (day - 1))
-        clear = np.flatnonzero(np.logical_and(np.bitwise_and(infected, clear_mask) == np.uint64(0), selected_people))
-        for pid in np.random.choice(clear, min(len(infected_pids), len(clear)), replace=False):
-            yield (day, pid, False)
-        tracker.next()
-    tracker.finish()
+        if day != last_day:
+                aggregator.swap_window(directory, last_day - WINDOW + 1, last_day + 1, day - WINDOW + 1, day + 1)
+                last_day = day
+        for s in sample_features_on_day(infected, selected_people, person_activies, aggregator, day):
+            yield s
+        t.next()
+    t.finish()
+    aggregator.unreference_window(last_day - WINDOW + 1, last_day + 1)
 
 # Use aggregator to lookup the visit and infected visit counts associated with
 # each place visited by pid on this day and the previous WINDOW - 1.
@@ -208,18 +278,6 @@ def lookup_visits(pid, day, person_activies, aggregator):
     places = [lid - 1 for lid in person_activies[pid] if lid != 0]
     visits, infected_visits = aggregator.lookup(places, range(day - WINDOW + 1, day + 1)).decrypt()
     return visits, infected_visits
-
-def lookup_all_visits(events, person_activies, aggregator, directory):
-    last_day = WINDOW
-    aggregator.reference_window(directory, last_day - WINDOW + 1, last_day + 1)
-    for (day, pid, infected_today) in events:
-        if person_activies[pid][0] != 0:
-            if day != last_day:
-                aggregator.swap_window(directory, last_day - WINDOW + 1, last_day + 1, day - WINDOW + 1, day + 1)
-                last_day = day
-            visits, infected_visits = lookup_visits(pid, day, person_activies, aggregator)
-            yield (infected_today, visits, infected_visits)
-    aggregator.unreference_window(last_day - WINDOW + 1, last_day + 1)
 
 # The input of our model is the total number of people visiting places
 # visted by a given individual, and the number of people visiting infected
@@ -299,14 +357,14 @@ input_signature = (tf.TensorSpec(shape=(1, WINDOW * BUCKETS * SAMPLES, 1), dtype
 def fit(infected, person_activities, model, aggregator, data, track, epochs=2):
     model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
     selected_people = np.add.reduce(person_activities, axis=1) > 0
-    events = list(sample_events(infected, selected_people, FIT_START_DAY, FIT_STOP_DAY, track))
+    count = Count()
     def prepared():
-        t = track("fit", len(events)/100)
-        features = lookup_all_visits(events, person_activities, aggregator, data.aggregator_directory())
-        return to_model_input_all(features, t)
+        features = sample_features_all_days(FIT_START_DAY, FIT_STOP_DAY, infected, selected_people, person_activities, aggregator, data.aggregator_directory(), track)
+        count.i = to_model_input_all(features, progress.dont_track("", 0))
+        return count
     input = tf.data.Dataset.from_generator(prepared, output_signature=input_signature)
     model.fit(x=input, epochs=epochs, verbose=2)
-    return len(events)
+    return count.count
 
 def predict(h, ctxt, data, track=progress.dont_track):
     _, person_activities = read(data, read_infections=False)
