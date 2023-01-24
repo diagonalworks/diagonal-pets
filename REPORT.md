@@ -1,0 +1,125 @@
+# Pandemic Response Modelling with Privacy Enhancing Technology: Technical report 
+
+
+# Diagonal Works Ltd.
+
+January 2022
+
+[hello@diagonal.works](mailto:hello@diagonal.works) / [https://diagonal.works](https://diagonal.works)
+
+[https://github.com/diagonalworks/diagonal-pets/blob/main/REPORT.md](https://github.com/diagonalworks/diagonal-pets/blob/main/REPORT.md)
+
+
+## Summary
+
+At [Diagonal](https://diagonal.works/), we build tools that allow people to interactively explore data about the built environment, helping them work through the tradeoffs inherent in shaping it. While we don’t work with public health data at the level of individuals, we took the opportunity of the challenge to explore the possibility of incorporating privacy preserving technology into systems that work with data about places in other domains.
+
+We trained a model to predict infection risk based solely on the aggregate number of visitors to places, computing these aggregates using homomorphic encryption to minimise exposure to sensitive data. We think this use of encryption greatly reduces privacy risk, enabling the aggregates to be computed by a third-party software-as-a-service provider. Using aggregate counts as features allows us to make useful predictions using a simple anonymous model that’s safe to be shared. A shareable model helps provide the transparency necessary to build and maintain the public trust necessary to obtain the social licence to work with sensitive data. This is particularly true in the domain of public health, where relying on explicit individual consent is problematic.
+
+We don’t expect models that use solely place-based features to have high predictive power for infection risk on their own - there are too many other aspects governing infection that are deliberately not taken into account due to our desire to focus on places for the purposes of this exploration; nor do we expect our own models to score particularly highly against the competition’s primary evaluation metrics. We do, however, believe there’s a place for them as a part of a wider system. We also think the techniques used in our submission can easily be adapted to other - non-place based - attributes and therefore serve a broad set of uses.
+
+In this report, we summarise our design and implementation, before finally touching on the data governance aspects of the proposed solution.
+
+
+## Technical implementation
+
+
+### Overview
+
+Our design roughly follows the description from our [initial whitepaper](https://github.com/diagonalworks/diagonal-pets/blob/main/whitepaper.md), though we use the fully homomorphic BFV cryptosystem, rather than our initial example of [Paillier](https://en.wikipedia.org/wiki/Paillier_cryptosystem). We aggregate counts of visits to places across clients, using them to train a relatively small neural network. We consider only ‘public’ places, and not households. We arbitrarily use simple federated averaging, as the visit count aggregation step is the most important part of our exploration.
+
+Squeezing our approach into the constraints of the Flower federated learning framework required significant compromises in our submission - including the use of a fake homomorphic encryption library. These issues are discussed later, in the implementation notes section. They neither change the predictive power of our approach, nor affect a real-world implementation. To validate this, our solution includes code to run outside the provided containers.
+
+
+### Data aggregation
+
+For each place, we count the total number of visitors on the simulation’s groundhog day, followed by the number of those visitors who are infected on each day of the simulation, within each client. We then aggregate these partial counts homomorphically across the clients to produce overall totals for each place. In a real deployment, our expectation is that this aggregation step is provided and run by a third party, likely as a cloud based service. Clients share the secret key for encrypted counts, the aggregating server has only access to the public key.
+
+The use of homomorphic encryption prevents this third party from seeing counts, minimising their exposure to data. In our submission, the same code runs for both the centralised and federated solutions - the centralised solution effectively aggregates the counts from a single client.
+
+We represent the counts for a given day as an array of integers, indexed by the ID of a place. This large array is broken into groups of 2^11 integers, and encrypted using the BFV cryptosystem, which supports addition, multiplication and rotation (we make use of the latter two during count lookup). Clients send encrypted counts for all places, whether or not they’re larger than zero, preventing the aggregator from seeing patterns in supplied places. Measured empirically, aggregation requires 4kb per place count. On the VA sample dataset, with around 136k places, the total RAM required to track total visits counts with a week of infection history is ~4Gb. While this data size is significant, it doesn’t present a problem to a careful, efficient implementation. The time to stream these counts from client to aggregating server and back dominates the computation cost of the homomorphic additions.
+
+In a real world deployment, key loss or compromise can be handled by throwing away all encrypted data, generating new keys, and rebuilding the counts, as no long term data is required - indeed, the aggregator need only maintain the encrypted data during the computation run.
+
+In our submission, we chose not to add additional privacy protection to the aggregate counts returned to clients. Although unlikely, one could imagine a malicious client using subset style attacks to learn something about the behaviour of individuals represented in other clients via the difference between the partial place counts supplied to the aggregator, and the returned total. In practice, this is unlikely, given the organisational context in which clients access the aggregator. We don’t believe additional protection is necessary, but counts could be made differentially private by the addition of laplace noise at the aggregator. Noise application could happen in a single phase, homomorphically, once all partial counts are collected but before results are returned, as the BFV scheme supports the addition of encrypted integers with plaintext.
+
+
+### Model input and architecture
+
+To build the input to our model for a given person, we lookup the counts of people visiting the places visited by that individual. We then look up the number of those visitors flagged as infected on the current simulation day, and each of the previous 6. We bucket these places by log<sub>6</sub>(total visits), and pick the top 8 ordered by the number of visitors infected on the most recent day. Bucketing by log<sub>6</sub>(total visits) enables the model to learn how to differentiate between the characteristics of different types of places, while ordering and truncation accounts for the fact that individuals visit differing numbers of places.
+
+Our model is a relatively small neural net, using a 1D convolutional layer for each place bucket to incorporate the historical infection counts, followed by two dense layers to combine the convolutional output of all buckets before a final sigmoid layer. We form positive training examples by finding individuals infected within a given number of days from the current day, and balance those with an equal number of negative training examples of individuals who remain uninfected during that time. Ideally the horizon of days to consider from the current day would be 7, to match the evaluation criteria. In practice, we set this value lower to improve accuracy, as we capture only a fraction of the aspects influencing infection.
+
+
+### Place visit count lookup
+
+To form the input to our model, we look up the visit counts associated with each place. Our aggregator provides two conceptual operations:
+
+
+
+* _add_, which adds a new set of encrypted visit counts for every place to the aggregators internal encrypted state, discussed in the previous section.
+* _lookup, _which returns the encrypted visit counts for a list of plaintext place identifiers (array indices), in a random order.
+
+Lookup is implemented by determining which group of 2^11 encrypted counts the given count resides within, and its position within the group. We then rotate that value into position 0, and mask other values by multiplying the group by [1, 0, 0 ……, 0]. The entire masked group forms our return value for that index. Return values are shuffled before being returned to the caller, to break the ordering with the supplied indices.
+
+We determined the cost of the homomorphic operations used by lookups to average ~100ms on a modern CPU core given the distribution of the number of places visited by individuals within the VA dataset, using the [Pyfhel](https://pyfhel.readthedocs.io/en/latest/index.html) library backed by [SEAL](https://www.microsoft.com/en-us/research/project/microsoft-seal/). This is approximately ~25x the cost of an unencrypted lookup. Looking up the places visited by all ~7.7M individuals within that dataset would require ~210h of CPU core time. To be useful in practice, inference would need to be completed within a maximum of a 24 hour period. Given inference is embarrassingly parallel, setting a practical goal of a 6h turnaround time would require 30 CPU cores. At 0.02p per CPU-core-hour and 0.003p per Gb hour, the underlying resource cost of homomorphic inference would be ~£3.70/day (based on typical, non-discounted, public cloud compute costs).
+
+We don’t intend result shuffling to prevent an honest-but-curious adversary from determining which set of counts belong to which place, as that could be accomplished by analysing repetitions within the entire set of lookup responses. Rather, the shuffling is a clear signal to callers of the API that reversing the identifier to count mapping falls outside the intended use of the system, and therefore the legal basis for its operation. In effect, the shuffling is an organisation control to improve data minimisation.
+
+Given the lookup operation uses plaintext place identifiers, care has to be taken to prevent the aggregator from being able to learn place co-visitation data. We suggest two mitigations:
+
+
+
+* The lookup option is provided by the aggregator, and clients send a list of plain text place identifiers. To prevent the aggregator using these identifiers, real lookup requests can be merged with a (significantly larger) number of synthetic lookup requests. Including an encrypted _mask_ in the lookup call, set to _encrypt([1, 0, 0, 0…., 0])_ for real requests and _encrypt([0, 0, 0, 0…., 0]) _to and used by the aggregator to multiply results before they’re returned to clients prevents their exposure to data about places they’re not interested in. While the added computational and communication load introduced through noise is not trivial, it’s manageable in a real-world implementation. Given the cost estimates above, signal-to-noise ratios of 1:2 to 1:10 are viable.
+* The lookup operation is executed by the client, in a secure enclave. The entire place visit count data for the day in question is sent from the aggregator to the client’s secure enclave, where the lookup operation takes place, partitioned from the client itself. As place identifiers are never sent to the aggregator during lookup, it isn’t able to learn co-visitation. As the set of all encrypted place visit counts never leave the enclave, the client isn’t able to learn anything about places it’s not interested in.
+
+The use of a secure enclave would be more efficient than adding noise for real world use cases, where each client is interested in a large number of places, and computation can be batched to consider the counts of a limited number of days at a given time. It does, however, require significantly more infrastructure to be able to securely transfer data to the enclave. While less efficient, the approach of adding noise is easier to implement - assuming noise is carefully generated to mirror real place co-visitation distributions (one approach would be generating fake lookup requests from real lookup requests through hashing with a variety of seeds).
+
+The implementation of these techniques is left to real-world implementation, and doesn’t form part of the submission.
+
+
+### Model privacy
+
+Given our model is place-centric, the primary risk posed by a model-inversion attack is the recovery of a set of places visited by a given individual. While no explicit place identifiers are used during training, the count of infected visitors to a place across a given number of days could be shared between a small number of places. The set of places visited by a given individual may also be relatively unique, which leads to the possibility of using model inversion to recover training examples that then allow the prediction of a further place visited by them given the count signature of a number of others. Given the relatively small size of our model, we think this risk is below the level at which additional mitigation is needed.
+
+From an information theoretical standpoint, our model consists of ~13k 32bit floating point weights, or ~420kbit of data. Taking the competition’s VA dataset, there are ~136k places, requiring 18bit for unique identification. Assume a perfect model inversion attack that determines a third place visited by an individual given another two. The attack would need to extract 3x18bit = 54bit of information from the model weights. The model would, therefore, provide enough information to identify a third place for ~8k people. In the VA population of ~7.7M individuals, that reduces to an upper bound on the re-identification risk of P(&lt;0.001). The practical re-identification risk would be several orders of magnitude lower, given the complexity and reliability of model inversion attacks, the need for a complete mapping of visit counts to place identifiers, and the number of place visits required to uniquely identify an individual being considerably higher than 2 in most cases - particularly as we do not consider household locations. We assume that the model constitutes anonymous data, and no information about individuals can be derived from it.
+
+A more practical risk could be the extraction of common co-visitation between places, i.e. ‘many people who visit place A also visit place B’. Given the mechanics of infection spread, this risk would be inherent in any model performing reasonably on infection prediction. While still remote, the potential impact of this risk can be mitigated by excluding places deemed ‘sensitive’ to from the training data - abortion clinics being a canonical example. The tradeoff between this additional level of privacy protection against the ability to detect outbreaks at sensitive places should be a topic of discussion for the ethical goverance around the project.
+
+### Challenge implementation
+
+Our model is defined in [model.py](https://github.com/diagonalworks/diagonal-pets/blob/main/diagonal_pets/model.py), together with the [training](https://github.com/diagonalworks/diagonal-pets/blob/main/diagonal_pets/model.py#L357) and [prediction](https://github.com/diagonalworks/diagonal-pets/blob/main/diagonal_pets/model.py#L369) loops, and the same code is called from both the centralised and federated entrypoints. The [homomorphic aggregator](https://github.com/diagonalworks/diagonal-pets/blob/main/diagonal_pets/crypto.py#L151) is defined in [crypto.py](https://github.com/diagonalworks/diagonal-pets/blob/main/diagonal_pets/crypto.py). All code is published under the [Apache 2.0  licence](https://www.apache.org/licenses/LICENSE-2.0).
+
+Our solution relies on transferring significant, but reasonable, amounts of data between clients and a third party aggregator when summing place visit counts, together with low latency communication with the aggregator when looking up the counts for places. In real world implementations, with communication protocols chosen to meet these requirements, this doesn’t present an issue. Within the challenge framework of Flower, communicating aggregates becomes challenging. As the only communication mechanism available is the sharing of weights, we use a series of ‘fake’ fit rounds to communicate place counts from clients to the server, and share back aggregate sums, effectively pretending they’re model weights. We use one round per day, before proceeding onto a series of ‘real’ fit rounds, using a simple federated averaging strategy - which could clearly be tuned. This is implemented as a [custom Flower strategy](https://github.com/diagonalworks/diagonal-pets/blob/main/diagonal_pets/federated.py#L48).
+
+While this is the only viable approach given the competition infrastructure, it has significant drawbacks. Flower is designed for disseminating a relatively small number of weights for a relatively small number of rounds, while we require a larger number of rounds communicating a large amount of data. The infrastructural overhead added by Flower between rounds is high and random. To allow Flower to run to completion, we minimise the size of encoded counts by replacing the homomorphic encryption library we rely on outside of Flower with a [fake stub which applies operations in the clear](https://github.com/diagonalworks/diagonal-pets/blob/main/diagonal_pets/crypto.py#L338), and uses a conventional integer encoding. We then use gzip to compress this encoding to bring the size of data to be shared to a tolerable level for aggregation with Flower. Obviously these caveats mean performance metrics calculated from our example are not predictive of those from real world implementations.
+
+The use of homomorphic encryption can be enabled through a [flag](https://github.com/diagonalworks/diagonal-pets/blob/main/solution_federated.py#L89) or [constant](https://github.com/diagonalworks/diagonal-pets/blob/main/solution_federated.py#L15), and we successfully apply it outside the competition infrastructure (either in the centralised context, or the federated context with a tuned dataset and Flower installation). Training and inference times are significantly degraded - visit lookup is 25x slower and the storage needed for place visit counts is 4 times higher. Model performance is unchanged, as the computation at the application level is identical. Given the size of the homomorphically encrypted data, our solution spends some effort streaming counts to and from disk, keeping only a working set in memory. A real world solution could make considerable performance improvements here.
+
+In real world implementations, training and inference performance impact can be mitigated through parallelisation across additional CPUs, particularly given the embarrassingly parallel operations our solution relies on - something that’s difficult in Python without infrastructure beyond the scope of the competition to avoid its global interpreter lock. Tediously, we [disable GPU use](https://github.com/diagonalworks/diagonal-pets/blob/main/solution_federated.py#L27) due to interactions between Tensorflow and Flower that would be trivially solvable with time.
+
+
+### Metrics
+
+On our own test runs with the VA dataset, we observe a typical AUC of ~0.79 with an AP score of 0.0237. Model performance is independent of centralised or federated training - at least across an even partitioning, the only scenario we regularly tested.
+
+Training and inference are ~25x slower when enabling homomorphic encryption in the submitted solution, but model performance isn’t impacted.
+
+The steep falloff in accuracy after a threshold speaks to our use of a single aspect of infection - public locations visited.
+
+While our solution would not be appropriate as a standalone risk model, it could be useful component of a wider system.
+
+
+## Information governance
+
+The underlying data used by our system are the individual level place visit histories and infection states. Although this data doesn’t include explicit identifiers for individuals, we don’t view it as anonymous, given the uniqueness of place visit histories. We assume, in a real UK deployment, each partition of this dataset is managed by a healthcare provider responsible for providing care to those individuals. This legitimate relationship enables the healthcare provider to collect and process that data under the regime of implied consent, as discussed in the [March 2013 Caldicott review](https://assets.publishing.service.gov.uk/government/uploads/system/uploads/attachment_data/file/192572/2900774_InfoGovernance_accv2.pdf). This relationship allows them to compute the partial place visit counts based on the activity of individuals they care for, for the purpose of training and using our place-based model for the purposes of infection control - and this use case is specially mentioned in section 8.2 of the Caldicott review. We assume, therefore, that the healthcare providers themselves run the parts of the solution surrounding central aggregation.
+
+We assume, in a real-world deployment, the aggregation of partial place visit counts is run by a third party provider, acting as a data processor on behalf of each of the healthcare providers under an explicit data sharing agreement. In this situation, the aggregator has a legal basis for processing unencrypted count data, however, the use of homomorphic encryption provides a technical guarantee that it meets the principles of [data minimisation](https://ico.org.uk/for-organisations/guide-to-data-protection/guide-to-the-general-data-protection-regulation-gdpr/principles/data-minimisation/) and [integrity & confidentiality](https://ico.org.uk/for-organisations/guide-to-data-protection/guide-to-the-general-data-protection-regulation-gdpr/principles/integrity-and-confidentiality-security/), as it’s not able to access the counts themselves. We see this guarantee as significant in gaining acceptance for deployment given the sensitivity of the data involved. 
+
+The most interesting data governance question is the legal basis for a client to obtain the aggregated counts of infected visits to all places from the third-party aggregator, since these counts necessarily summarise the data held by other healthcare providers. At a simplistic level, these aggregate counts meet the ICO’s [guidelines for anonymity](https://ico.org.uk/media/about-the-ico/consultations/2619862/anonymisation-intro-and-first-chapter.pdf) - they neither relate to an identifiable individual, nor allow an individual to be identified. However, as the guidelines make clear, whether an dataset can be considered anonymous depends on the organisational holding it. Subset-style attacks on aggregate count data by a malicious healthcare provider could potentially infer the behaviour of an individual cared for by another provider, particularly given the wide-range of auxiliary data accessible to healthcare providers.
+
+Our opinion is that the aggregate counts don’t constitute personal data, but do require thought on their use. Following discussion with the ICO’s innovation hub team, we believe that if the purpose of using aggregate counts matches the purpose for which a healthcare provider originally computed the partial counts on their own data, then the original public health justification continues to apply. In this situation, data minimisation becomes particularly important, and our approach has advantages in both areas. Providers only request and decrypt counts for places individuals they care for have visited, and unless they fail to act honestly, they’re unable to learn anything about places that aren’t visited by other individuals. Counts could be made differentially private during aggregation, as discussed in above, although we don’t consider it necessary given the organisation controls that would inherently surround the use of the system.
+
+In any situation that relies on implied consent, transparency is key to build and maintain the public trust. Our use of aggregate place visit features allows us to make reasonable predictions from a model that can be considered anonymous data. The anonymity of the model allows it to be shared more widely than models that potentially encode sensitive data, reducing the barriers to audit by third parties, for example, for bias and privacy risk. Likewise, the relatively simple, individual level, inputs to the model would allow interactive tools to be built that allow the general population to explore its action by crafting their own inputs and seeing the prediction.
+
+Although currently uncommon in the deployment of machine learning based systems, we believe third party audits and tools to expose the underlying behaviour of a system to the populations they impact are key to building and maintaining the social licence necessary for the broad use of data, particularly when working with sensitive data under a regime of implied consent data.
