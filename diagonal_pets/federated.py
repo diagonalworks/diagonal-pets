@@ -22,11 +22,12 @@ FIT_STATE_TRAIN = 3
 FIT_STATE_SAVE_MODEL = 4
 
 FIT_TRAINING_ROUNDS = 2
+FIT_DAYS_PER_AGGREGATION_STEP = 4
 
 FIT_ROUND_COUNT_VISITS = 1
 FIT_ROUND_AGGREGATE_VISITS = 2
-FIT_ROUND_AGGREGATE_ONE_DAY_INFECTED_VISITS = 3
-FIT_ROUND_TRAIN = FIT_ROUND_AGGREGATE_ONE_DAY_INFECTED_VISITS + (FIT_STOP_DAY - FIT_START_DAY) + 1
+FIT_ROUND_AGGREGATE_INFECTED_VISITS = 3
+FIT_ROUND_TRAIN = FIT_ROUND_AGGREGATE_INFECTED_VISITS + int((FIT_STOP_DAY - FIT_START_DAY) / FIT_DAYS_PER_AGGREGATION_STEP) + 1
 FIT_ROUND_SAVE_MODEL = FIT_ROUND_TRAIN + FIT_TRAINING_ROUNDS
 
 FIT_ROUNDS = FIT_ROUND_SAVE_MODEL
@@ -39,8 +40,8 @@ def fit_round_to_state(round):
         return FIT_STATE_COUNT_VISITS, 0
     if round == FIT_ROUND_AGGREGATE_VISITS:
         return FIT_STATE_AGGREGATE_VISITS, 0
-    if round >= FIT_ROUND_AGGREGATE_ONE_DAY_INFECTED_VISITS and round < FIT_ROUND_TRAIN:
-        return FIT_STATE_AGGREGATE_INFECTED_VISITS, round - FIT_ROUND_AGGREGATE_ONE_DAY_INFECTED_VISITS
+    if round >= FIT_ROUND_AGGREGATE_INFECTED_VISITS and round < FIT_ROUND_TRAIN:
+        return FIT_STATE_AGGREGATE_INFECTED_VISITS, (round - FIT_ROUND_AGGREGATE_INFECTED_VISITS) * FIT_DAYS_PER_AGGREGATION_STEP
     if round < FIT_ROUND_SAVE_MODEL:
         return FIT_STATE_TRAIN, round - FIT_ROUND_TRAIN + 1
     return FIT_STATE_SAVE_MODEL, 0
@@ -102,8 +103,8 @@ class FitStrategy(Strategy):
         if day < FIT_STOP_DAY:
             aggregator = diagonal_pets.make_aggregator(self.h, self.ctxt)
             for client, result in results:
-                aggregator.apply_fl_parameters(result.parameters, day=day)
-            aggregator.fill_fl_parameters(parameters, day=day)
+                aggregator.apply_fl_parameters(result.parameters, days=range(day, day + FIT_DAYS_PER_AGGREGATION_STEP))
+            aggregator.fill_fl_parameters(parameters, days=range(day, day + FIT_DAYS_PER_AGGREGATION_STEP))
         return parameters, {}
 
     def configure_evaluate(self, server_round, parameters, client_manager):
@@ -173,16 +174,16 @@ class FitClient(Client):
             aggregator.apply_fl_parameters(parameters, visits=True)
             aggregator.write(self.data.aggregator_directory(), visits=True)
         else:
-            aggregator.apply_fl_parameters(parameters, day=current_day-1)
-            aggregator.write(self.data.aggregator_directory(), day=current_day-1)
+            aggregator.apply_fl_parameters(parameters, days=range(current_day - FIT_DAYS_PER_AGGREGATION_STEP, current_day))
+            aggregator.write(self.data.aggregator_directory(), days=range(current_day - FIT_DAYS_PER_AGGREGATION_STEP, current_day))
 
     def _aggregate_infected_visits(self, day):
         parameters = Parameters(tensors=[], tensor_type="")
         if day < FIT_STOP_DAY: # The last aggregation round only runs to save the last day's infected visits
             aggregator = diagonal_pets.make_aggregator(self.h, self.ctxt)
-            aggregator.read(self.data.aggregator_directory(), day=day)
+            aggregator.read(self.data.aggregator_directory(), days=range(day, day+FIT_DAYS_PER_AGGREGATION_STEP))
             parameters = Parameters(tensors=[], tensor_type="")
-            aggregator.fill_fl_parameters(parameters, day=day)
+            aggregator.fill_fl_parameters(parameters, days=range(day, day+FIT_DAYS_PER_AGGREGATION_STEP))
         return fl.common.FitRes(Status(Code.OK, "ok"), parameters, 0, {})
 
     def _train(self, parameters):
