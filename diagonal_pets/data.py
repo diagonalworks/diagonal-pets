@@ -61,8 +61,11 @@ class FileData:
     def rotate_key_filename(self):
         return self._local_filename("rotate.key", prefixed=False)
 
-    def preds_dest_filename(self):
-        return self.preds_dest_path
+    def preds_dest_filename(self, shard=0, shards=1):
+        if shard == 0 and shards == 1:
+            return self.preds_dest_path
+        else:
+            return self.preds_dest_path.with_stem(self.preds_dest_path.stem + (".%d-of-%d" % (shard, shards)))
 
     def _local_filename(self, name, prefixed=True):
         path = self.client_dir or self.server_dir or self.model_dir

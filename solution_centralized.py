@@ -66,11 +66,9 @@ def fit(fake_pyfhel=FAKE_PYFHEL, **args):
     aggregator.clear_infected_visits(0, FIT_STOP_DAY - diagonal_pets.WINDOW)
 
 def predict(fake_pyfhel=FAKE_PYFHEL, **args):
-    h, ctxt = diagonal_pets.make_pyfhel(fake_pyfhel)
-    diagonal_pets.init_pyfhel(h)
+    h, _ = diagonal_pets.make_pyfhel(fake_pyfhel)
     data = diagonal_pets.make_file_data(**args)
-    diagonal_pets.read_keys(data, h)
-    return diagonal_pets.predict(h, ctxt, data, diagonal_pets.track)
+    diagonal_pets.predict_parallel(h, data)
 
 def score(score_prefix, **args):
     import matplotlib.pyplot as plt

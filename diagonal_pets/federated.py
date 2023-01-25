@@ -204,10 +204,9 @@ class FitClient(Client):
 
 class TestClient(Client):
 
-    def __init__(self, id, h, ctxt, **args):
+    def __init__(self, id, h, **args):
         self.id = id
         self.h = h
-        self.ctxt = ctxt
         self.data = diagonal_pets.make_file_data(**args)
         diagonal_pets.init_pyfhel(self.h)
 
@@ -216,7 +215,7 @@ class TestClient(Client):
         return GetParametersRes(Status(Code.OK, "ok"), parameters)
 
     def evaluate(self, ins):
-        diagonal_pets.predict(self.h, self.ctxt, self.data, diagonal_pets.track)
+        diagonal_pets.predict_parallel(self.h, self.data)
         return EvaluateRes(Status(Code.OK, "ok"), 0.0, 0, {})
 
 class TestStrategy(Strategy):
