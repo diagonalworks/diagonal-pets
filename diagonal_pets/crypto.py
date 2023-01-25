@@ -198,24 +198,34 @@ class Aggregator:
     def all_infected_visits(self, day):
         return self.infected_visits[day]
 
-    def write(self, directory, visits=False, day=-1):
+    def write(self, directory, visits=False, day=-1, days=None):
         os.makedirs(directory, exist_ok=True)
-        if visits or day < 0:
+        if visits or (day < 0 and days is None):
             with open(directory / "visits", "wb") as f:
                 self.visits.to_file(f)
         if not visits:
-            days = [day] if day >= 0 else range(0, self.DAYS)
-            for day in days:
+            if day >= 0:
+                to_write = [day]
+            elif days is not None:
+                to_write = days
+            else:
+                to_write = range(0, self.DAYS)
+            for day in to_write:
                 with open(directory / ("day-%d" % day), "wb") as f:
                     self.infected_visits[day].to_file(f)
 
-    def read(self, directory, visits=False, day=-1):
-        if visits or day < 0:
+    def read(self, directory, visits=False, day=-1, days=None):
+        if visits or (day < 0 and days is None):
             with open(directory / "visits", "rb") as f:
                 self.visits.from_file(f)
         if not visits:
-            days = [day] if day >= 0 else range(0, self.DAYS)
-            for day in days:
+            if day >= 0:
+                to_read = [day]
+            elif days is not None:
+                to_read = days
+            else:
+                to_read = range(0, self.DAYS)
+            for day in to_read:
                 self._read_day(directory, day)
 
     # Increase the reference count for the given range of days. Days without
@@ -285,27 +295,36 @@ class Aggregator:
 
     # Fill the Flower parameters instance with a serialised version
     # of the given visit counts.
-    def fill_fl_parameters(self, p, visits=False, day=-1):
-        if (not visits and day < 0) or (visits and day >=0):
-            raise ValueError("Must specify exactly one of visits or day")
+    def fill_fl_parameters(self, p, visits=False, day=-1, days=None):
+        if (not visits and (day < 0 and days is None)) or (visits and (day >=0 or days != None)):
+            raise ValueError("Must specify exactly one of visits or day(s)")
         p.tensor_type = self.FL_PARAMETER_TYPE
         if visits:
             p.tensors = [self.all_visits().to_bytes()]
         else:
-            p.tensors = [self.all_infected_visits(day).to_bytes()]
+            if days is None:
+                days = [day]
+            p.tensors = [self.all_infected_visits(day).to_bytes() for day in days]
 
     # Add the visit counts serialised into the given Flower parameters.
-    def apply_fl_parameters(self, p, visits=False, day=-1):
-        if (not visits and day < 0) or (visits and day >=0):
-            raise ValueError("Must specify exactly one of visits or day")
+    def apply_fl_parameters(self, p, visits=False, day=-1, days=None):
+        if (not visits and (day < 0 and days is None)) or (visits and (day >=0 or days != None)):
+            raise ValueError("Must specify exactly one of visits or day(s)")
         if p.tensor_type != self.FL_PARAMETER_TYPE:
             raise ValueError("Expected tensor_type %s, found %s" % (self.FL_PARAMETER_TYPE, p.tensor_type))
-        counts = EncryptedCounts(self.h, self.ctxt)
-        counts.from_bytes(p.tensors[0])
         if visits:
+            counts = EncryptedCounts(self.h, self.ctxt)
+            counts.from_bytes(p.tensors[0])
             self.add_visits(counts)
         else:
-            self.add_infected_visits(day, counts)
+            if days is None:
+                days = [day]
+            if len(p.tensors) != len(days):
+                raise ValueError("Expected %d days, found %d in parameters" % (len(days), len(p.tensors)))
+            for i, day in enumerate(days):
+                counts = EncryptedCounts(self.h, self.ctxt)
+                counts.from_bytes(p.tensors[i])
+                self.add_infected_visits(day, counts)
 
 def make_aggregator(h, ctxt):
     return Aggregator(h, ctxt)
