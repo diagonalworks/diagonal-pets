@@ -9,9 +9,11 @@
 import concurrent.futures
 import csv
 import math
+import multiprocessing
 import numpy as np
-import tensorflow as tf
 import os
+import random
+import tensorflow as tf
 
 from diagonal_pets import crypto
 from diagonal_pets import progress
@@ -34,6 +36,9 @@ HORIZON = 3
 # visits to discard while attempting to find an example with infected visits.
 # See bias_infected_places. Empirically set based on test fit runs.
 INFECTED_PLACE_BIAS = 5
+
+# Log samples of events during fit and prediction
+LOG_SAMPLES = False
 
 # Count the number of items yields from an iterator
 class Count:
@@ -146,7 +151,6 @@ def read(data, prefix="", read_infections=True):
     activities.fill(0)
     person_activities = np.zeros((max_pid + 1, max_activities), np.uint32)
     visits = np.zeros(max_alid + 1, np.uint16)
-    infected_visits = np.zeros((DAYS, max_alid + 1), np.uint16)
     assigned_activities = 0
     with data.activity_location_assignment() as rows:
         for (pid, lid) in rows:
@@ -154,9 +158,6 @@ def read(data, prefix="", read_infections=True):
                 person_activities[pid][activities[pid]] = lid + 1
                 activities[pid] += 1
                 visits[lid] += 1
-                for day in range(0, DAYS):
-                    if infected[pid] & np.uint64(1 << day):
-                        infected_visits[day][lid] += 1
                 assigned_activities += 1
     print(prefix+"assigned_activities:", assigned_activities)
     return (infected, person_activities)
@@ -221,10 +222,31 @@ def clear_within_horizon(infected, selected_people, day):
 # Iterate across the individuals yielded by pids, returning the total
 # place visits counts for place they visit, together with the historical
 # infection counts within WINDOW.
-def make_features_all(pids, infected_today, day, person_activies, aggregator):
+def make_features_all(pids, infected_today, day, person_activies, infected, aggregator):
     for pid in pids:
         visits, infected_visits = lookup_visits(pid, day, person_activies, aggregator)
+        if LOG_SAMPLES and random.random() < 0.005:
+            log_features(pid, day, infected_today, visits, infected_visits, infected)
         yield infected_today, visits, infected_visits
+
+def log_features(pid, day, infected_today, visits, infected_visits, infected):
+    print("".join([[".", "X"][(infected[pid] & np.uint64(1 << d)) != 0] for d in range(0, 64)]))
+    print((" " * (day - 1)) + ("^" * (HORIZON + 1)))
+    print(infected_today, visits, infected_visits)
+    tensor = make_batch()
+    to_model_input(visits, infected_visits, tensor[0])
+    log_model_input(tensor[0])
+
+def log_model_input(tensor):
+    i = 0
+    for b in range(0, BUCKETS):
+        print("* bucket %d" % b)
+        for w in range(0, WINDOW):
+            line = []
+            for s in range(0, SAMPLES):
+                line.append("%2d" % tensor[i][0])
+                i += 1
+            print("%d: %s" % (w, " ".join(line)))
 
 # Scan forward INFECTED_PLACE_BIAS feature examples, looking for features with
 # at least one non-zero infected visit count, returning the first found,
@@ -242,11 +264,16 @@ def bias_infected_places(features):
     except StopIteration:
         pass
 
+def skip_uninfected_places(features):
+    for infected_today, visits, infected_visits in features:
+        if sum([sum(place) for place in infected_visits]) > 0:
+            yield infected_today, visits, infected_visits
+
 def sample_features_on_day(infected, selected_people, person_activies, aggregator, day):
     infected_pids = infected_within_horizon(infected, selected_people, day)
-    infected_visits = make_features_all(infected_pids, True, day, person_activies, aggregator)
+    infected_visits = skip_uninfected_places(make_features_all(infected_pids, True, day, person_activies, infected, aggregator))
     clear_pids = clear_within_horizon(infected, selected_people, day)
-    clear_visits = bias_infected_places(make_features_all(clear_pids, False, day, person_activies, aggregator))
+    clear_visits = skip_uninfected_places(make_features_all(clear_pids, False, day, person_activies, infected, aggregator))
     try:
         while True:
             yield next(infected_visits)
@@ -264,8 +291,8 @@ def sample_features_all_days(start_day, end_day, infected, selected_people, pers
     aggregator.reference_window(directory, last_day - WINDOW + 1, last_day + 1)
     for day in range(start_day, end_day):
         if day != last_day:
-                aggregator.swap_window(directory, last_day - WINDOW + 1, last_day + 1, day - WINDOW + 1, day + 1)
-                last_day = day
+            aggregator.swap_window(directory, last_day - WINDOW + 1, last_day + 1, day - WINDOW + 1, day + 1)
+            last_day = day
         for s in sample_features_on_day(infected, selected_people, person_activies, aggregator, day):
             yield s
         t.next()
@@ -366,25 +393,57 @@ def fit(infected, person_activities, model, aggregator, data, track, epochs=2):
     model.fit(x=input, epochs=epochs, verbose=2)
     return count.count
 
-def predict(h, ctxt, data, track=progress.dont_track):
+def predict(h, ctxt, data, track=progress.dont_track, shard=0, shards=1):
     _, person_activities = read(data, read_infections=False)
     aggregator = crypto.make_aggregator(h, ctxt)
     aggregator.read(data.aggregator_directory(), visits=True)
     aggregator.read_infected_visits_window(data.aggregator_directory(), FIT_STOP_DAY - WINDOW, FIT_STOP_DAY)
     model = tf.keras.models.load_model(data.model_filename())
-    pids = [pid for (pid,) in data.preds_format()]
+    pids = [pid for (pid,) in data.preds_format() if pid % shards == shard]
     print("pids:", len(pids))
     batch = make_batch(len(pids))
-    t = track("prepare", len(pids)/1000)
+    t = track("predict" + (str(shard) if shards > 0 else ""), len(pids)/1000)
     for i, pid in enumerate(pids):
         visits, infected_visits = lookup_visits(pid, FIT_STOP_DAY - 1, person_activities, aggregator)
         to_model_input(visits, infected_visits, batch[i])
+        if LOG_SAMPLES and random.random() < 0.05:
+            log_model_input(batch[i])
         if i % 1000 == 0:
             t.next()
     t.finish()
     predictions = model.predict(x=batch, workers=os.cpu_count(), verbose=2)
-    with open(data.preds_dest_filename(), "wt") as f:
+    with open(data.preds_dest_filename(shard=shard, shards=shards), "wt") as f:
         w = csv.writer(f)
         w.writerow(("pid", "score"))
         for (pid, prediction) in zip(pids, predictions):
             w.writerow((str(pid), str(prediction[0])))
+
+def predict_worker(data, fake_pyfhel, shard, shards):
+    h, ctxt = crypto.make_pyfhel(fake_pyfhel)
+    crypto.init_pyfhel(h)
+    crypto.read_keys(data, h, secret=True, public=True, rotate=True)
+    predict(h, ctxt, data, progress.track, shard, shards)
+
+def predict_parallel(h, data, shards=4):
+    fake_pyfhel = isinstance(h, crypto.FakePyfhel)
+    workers = [multiprocessing.Process(target=predict_worker, args=(data, fake_pyfhel, shard, shards)) for shard in range(0, shards)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    inputs = [open(data.preds_dest_filename(shard=shard, shards=shards), "rt") for shard in range(0, shards)]
+    with open(data.preds_dest_filename(), "wt") as f:
+        for i, input in enumerate(inputs):
+            line = input.readline()
+            if i == 0:
+                f.write(line) # Copy header
+        done = False
+        while not done:
+            for input in inputs:
+                line = input.readline()
+                if line == "":
+                    done = True
+                    break
+                f.write(line)
+        for input in inputs:
+            input.close()

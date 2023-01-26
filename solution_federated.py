@@ -59,11 +59,11 @@ def test_strategy_factory(server_dir, fake_pyfhel=FAKE_PYFHEL, prefix="dw"):
     return diagonal_pets.TestStrategy(), diagonal_pets.TEST_ROUNDS
 
 def test_client_factory(cid, fake_pyfhel=FAKE_PYFHEL, client_dir=None, **args):
-    h, ctxt = diagonal_pets.make_pyfhel(fake_pyfhel)
+    h, _ = diagonal_pets.make_pyfhel(fake_pyfhel)
     diagonal_pets.init_pyfhel(h)
     data = diagonal_pets.make_file_data(client_dir=client_dir)
     diagonal_pets.read_keys(data, h, secret=True, public=True, rotate=True)
-    return diagonal_pets.TestClient(cid, h, ctxt, client_dir=client_dir, **args)
+    return diagonal_pets.TestClient(cid, h, client_dir=client_dir, **args)
 
 def paths_from_flags(flags, cid):
     input = Path(flags.input)
